@@ -1,112 +1,110 @@
 package org.adekharianto.qrscan;
 
 import android.app.Activity;
-import android.content.ContentValues;
-import android.content.Context;
-import android.net.Uri;
-import android.os.Build;
-import android.os.Environment;
-import android.provider.MediaStore;
-import android.util.Base64;
-import android.webkit.JavascriptInterface;
-import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
-import android.webkit.WebView;
-import android.widget.Toast;
-
+import android.webkit.PermissionRequest;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import android.content.pm.PackageManager;
+import android.os.Build;
+import android.util.Log;
+import android.os.Environment;
+import java.io.File;
 import java.io.FileOutputStream;
-import java.io.OutputStream;
+import java.util.Base64;
 
-/**
- * Helper kecil yang dipanggil dari Python (lewat pyjnius) supaya:
- * 1. WebView mengizinkan permintaan kamera dari JavaScript (getUserMedia),
- *    yang dibutuhkan oleh library html5-qrcode di index.html.
- * 2. JavaScript bisa menyimpan file .xlsx hasil export ke folder Download
- *    publik di HP (lewat AndroidBridge.saveXlsxBase64).
- */
 public class WebViewHelper {
-
-    public static WebChromeClient createChromeClient(final Activity activity) {
-        return new WebChromeClient() {
-            @Override
-            public void onPermissionRequest(final PermissionRequest request) {
-                activity.runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        // Otomatis izinkan semua resource yang diminta (kamera/mic)
-                        // karena kita sudah meminta izin runtime Android sebelumnya.
-                        request.grant(request.getResources());
-                    }
-                });
-            }
-        };
+    
+    private static final String TAG = "WebViewHelper";
+    private Activity activity;
+    
+    public WebViewHelper(Activity activity) {
+        this.activity = activity;
     }
-
-    public static AndroidBridge createBridge(Activity activity) {
-        return new AndroidBridge(activity);
-    }
-
-    public static class AndroidBridge {
-        private final Activity activity;
-
-        public AndroidBridge(Activity activity) {
+    
+    /**
+     * WebChromeClient untuk handle media permissions (camera, microphone)
+     */
+    public static class MediaWebChromeClient extends WebChromeClient {
+        private Activity activity;
+        
+        public MediaWebChromeClient(Activity activity) {
             this.activity = activity;
         }
-
-        /**
-         * Dipanggil dari JavaScript: window.AndroidBridge.saveXlsxBase64(base64, namaFile)
-         * Menyimpan file ke folder Download publik (terlihat oleh user/File Manager).
-         */
-        @JavascriptInterface
-        public void saveXlsxBase64(final String base64Data, final String fileName) {
-            try {
-                byte[] bytes = Base64.decode(base64Data, Base64.DEFAULT);
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    ContentValues values = new ContentValues();
-                    values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
-                    values.put(MediaStore.Downloads.MIME_TYPE,
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-                    values.put(MediaStore.Downloads.IS_PENDING, 1);
-
-                    Uri uri = activity.getContentResolver().insert(
-                            MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-                    if (uri != null) {
-                        OutputStream out = activity.getContentResolver().openOutputStream(uri);
-                        if (out != null) {
-                            out.write(bytes);
-                            out.close();
+        
+        @Override
+        public void onPermissionRequest(final PermissionRequest request) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                if (request != null) {
+                    String[] resources = request.getResources();
+                    for (String resource : resources) {
+                        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)) {
+                            if (ContextCompat.checkSelfPermission(
+                                    activity,
+                                    android.Manifest.permission.CAMERA)
+                                    != PackageManager.PERMISSION_GRANTED) {
+                                ActivityCompat.requestPermissions(
+                                        activity,
+                                        new String[]{android.Manifest.permission.CAMERA},
+                                        1);
+                            }
                         }
-                        values.clear();
-                        values.put(MediaStore.Downloads.IS_PENDING, 0);
-                        activity.getContentResolver().update(uri, values, null, null);
                     }
-                } else {
-                    java.io.File downloadsDir = Environment.getExternalStoragePublicDirectory(
-                            Environment.DIRECTORY_DOWNLOADS);
-                    if (!downloadsDir.exists()) downloadsDir.mkdirs();
-                    java.io.File outFile = new java.io.File(downloadsDir, fileName);
-                    FileOutputStream fos = new FileOutputStream(outFile);
-                    fos.write(bytes);
-                    fos.close();
+                    request.grant(request.getResources());
                 }
-
-                activity.runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        Toast.makeText(activity, "Tersimpan di Download: " + fileName,
-                                Toast.LENGTH_LONG).show();
-                    }
-                });
-            } catch (Exception e) {
-                activity.runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        Toast.makeText(activity, "Gagal menyimpan file: " + e.getMessage(),
-                                Toast.LENGTH_LONG).show();
-                    }
-                });
             }
         }
+    }
+    
+    /**
+     * Simpan file XLSX dari base64 ke folder Download
+     */
+    public boolean saveXlsxFile(String base64Data, String filename) {
+        try {
+            byte[] decodedData;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                decodedData = Base64.getDecoder().decode(base64Data);
+            } else {
+                decodedData = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT);
+            }
+            
+            File downloadsDir = Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_DOWNLOADS);
+            
+            if (!downloadsDir.exists()) {
+                downloadsDir.mkdirs();
+            }
+            
+            File file = new File(downloadsDir, filename);
+            
+            try (FileOutputStream fos = new FileOutputStream(file)) {
+                fos.write(decodedData);
+                fos.flush();
+            }
+            
+            Log.i(TAG, "File saved: " + file.getAbsolutePath());
+            return true;
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error saving file: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    /**
+     * Minta permission untuk camera
+     */
+    public boolean requestCameraPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA)
+                    != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                        activity,
+                        new String[]{android.Manifest.permission.CAMERA},
+                        1);
+                return false;
+            }
+        }
+        return true;
     }
 }
